@@ -32,12 +32,12 @@ metadata %>% readr::write_csv("metadata.csv")
 names(all_pcawg_rds) = metadata$sample
 
 #### Choose the filters to apply later ####
-min_purity = 0.1
-min_avg_coverage = 10
+min_purity = 0.6
+min_avg_coverage = 40
 #ttypes = c(NA, 'Liver-HCC', 'Prost-AdenoCA') # take some tumor types
 ttypes = unique(metadata$ttype) # take all the tumor types
 min_karyotype_mut = 10
-min_avg_coverage_karyotype = 30
+min_avg_coverage_karyotype = 15
 
 
 # apply some primary filters on PURITY, COVERAGE and TUMOR TYPE
@@ -79,8 +79,9 @@ all_cnaqc = lapply(all_pcawg_rds,
 #### Assessing the quality of the data with CNAqc ####
 
 # peak and CCF analysis
-# it's going to take some minutes (even for only 20 samples)
+# it's going to take some minutes
 
+start_time <- Sys.time()
 all_cnaqc = lapply(all_cnaqc,  
                    function(x) {
                      x = x %>% 
@@ -91,6 +92,8 @@ all_cnaqc = lapply(all_cnaqc,
                      return(x)
                    })
 
+end_time <- Sys.time()
+total_time = end_time - start_time
 
 # take out some results from the cnaqc object
 cnaqc_res = data.frame(matrix(ncol = 5))
@@ -147,6 +150,7 @@ cnaqc_res %>% readr::write_csv("cnaqc_res.csv")
 ccf_res %>% readr::write_csv("ccf_res.csv")
 
 
+
 # apply last filters on the PASS/FAIL status and on the COVERAGE per karyotype
 
 filtered_cnaqc_res = cnaqc_res %>% 
@@ -158,7 +162,15 @@ filtered_ccf_res = ccf_res %>%
 filtered_results = full_join(filtered_cnaqc_res, filtered_ccf_res) %>% 
   filter(cna_QC=='PASS' & ccf_QC=='PASS')
 
-filtered_cnaqc = all_cnaqc[unique(filtered_results$sample)]
+# keep at least two karyotypes per sample
+samples_to_keep = filtered_results %>%
+  group_by(sample, karyotype) %>%
+  summarise(.groups = 'drop') %>%
+  group_by(sample) %>%
+  summarise(n_sample = n()) %>%
+  filter(n_sample > 1)
+
+filtered_cnaqc = all_cnaqc[samples_to_keep$sample]
 
 filtered_cnaqc = lapply(filtered_cnaqc,
                         function(x) {
@@ -173,7 +185,8 @@ filtered_cnaqc = lapply(filtered_cnaqc,
                           return(x)
                           })
   
-#
+length(unique(filtered_results$sample))
+dim(filtered_results)
 
 # all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef' %>% plot_peaks_analysis()
 # all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef' %>% plot_CCF()
