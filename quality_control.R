@@ -8,14 +8,16 @@ require(mobster)
 setwd("/Users/solonicolas/DSSC/Genomic Data Analytics/Giulio/exam")
 file_path = "./rds_giasone"
 
+# take the time
+start_time <- Sys.time()
 
 #### Load the data ####
 pcawg_files = list.files(file_path, full.names = TRUE)
 
 # for now let's take only 20 samples
-pcawg_files = pcawg_files[1:20]
+#pcawg_files = pcawg_files[1:10]
 all_pcawg_rds = lapply(pcawg_files, readRDS)
-
+#all_pcawg_rds =readRDS('rds_PCAWG_selected.rds')
 
 # save some metadata of the samples in a df
 metadata = Reduce(rbind, lapply(all_pcawg_rds,
@@ -25,19 +27,21 @@ metadata = Reduce(rbind, lapply(all_pcawg_rds,
                                   return (x$metadata)
                                 }))
 
+
 # write the metadata in a csv file
 metadata %>% readr::write_csv("metadata.csv")
 
 # index each row with the sample name
 names(all_pcawg_rds) = metadata$sample
 
+
 #### Choose the filters to apply later ####
 min_purity = 0.6
 min_avg_coverage = 40
-#ttypes = c(NA, 'Liver-HCC', 'Prost-AdenoCA') # take some tumor types
+#ttypes = c(NA, 'Ovary-AdenoCa') # take some tumor types
 ttypes = unique(metadata$ttype) # take all the tumor types
-min_karyotype_mut = 10
-min_avg_coverage_karyotype = 15
+min_absolute_karyotype_mutations = 30
+min_karyotype_size = 0.05
 
 
 # apply some primary filters on PURITY, COVERAGE and TUMOR TYPE
@@ -80,28 +84,24 @@ all_cnaqc = lapply(all_pcawg_rds,
 
 # peak and CCF analysis
 # it's going to take some minutes
-
-start_time <- Sys.time()
 all_cnaqc = lapply(all_cnaqc,  
                    function(x) {
                      x = x %>% 
                        CNAqc::analyze_peaks(
-                         min_absolute_karyotype_mutations = min_karyotype_mut
+                         min_absolute_karyotype_mutations = min_absolute_karyotype_mutations,
+                         min_karyotype_size = min_karyotype_size
                         ) %>% 
                        CNAqc::compute_CCF() 
                      return(x)
                    })
 
-end_time <- Sys.time()
-total_time = end_time - start_time
-
 # take out some results from the cnaqc object
-cnaqc_res = data.frame(matrix(ncol = 5))
+cnaqc_res = data.frame(matrix(ncol =5))
 colnames(cnaqc_res) = c("sample",
                         "karyotype",
                         "mutation_multiplicity",
-                        "avg_coverage_karyotype",
-                        "cna_QC")
+                        "cna_QC",
+                        "overall_cna_QC")
 
 ccf_res = data.frame(matrix(ncol = 3))
 colnames(ccf_res) = c("sample",
@@ -118,19 +118,14 @@ for(x in all_cnaqc){
     karyotypes = x$peaks_analysis$matches$karyotype
     mutation_multiplicity = x$peaks_analysis$matches$mutation_multiplicity
     QC = x$peaks_analysis$matches$QC
+    overall_QC = x$peaks_analysis$QC
     
     for(i in 1:length(karyotypes)){
-      
-      avg_coverage_karyotype = x$snvs %>%
-        filter(karyotype==karyotypes[i]) %>%
-        summarise(mean = mean(DP)) %>% 
-        select(mean)
-      
       cnaqc_res[nrow(cnaqc_res)+1,] = c(sample,
                                         karyotypes[i],
                                         mutation_multiplicity[i],
-                                        avg_coverage_karyotype,
-                                        QC[i])
+                                        QC[i],
+                                        overall_QC)
     }
     
     for(ccf in x$CCF_estimates){
@@ -150,44 +145,37 @@ cnaqc_res %>% readr::write_csv("cnaqc_res.csv")
 ccf_res %>% readr::write_csv("ccf_res.csv")
 
 
+# apply last filters on the PASS/FAIL status
 
-# apply last filters on the PASS/FAIL status and on the COVERAGE per karyotype
+filtered_results = inner_join(cnaqc_res,
+                              ccf_res,
+                              by = c("sample", "karyotype")) %>% 
+  filter(cna_QC=='PASS' & overall_cna_QC=='PASS' & ccf_QC=='PASS')
 
-filtered_cnaqc_res = cnaqc_res %>% 
-  filter(cna_QC=='PASS' & avg_coverage_karyotype>min_avg_coverage_karyotype)
+filtered_cnaqc = all_cnaqc[unique(filtered_results$sample)]
 
-filtered_ccf_res = ccf_res %>% 
-  filter(ccf_QC=='PASS')
+length(filtered_cnaqc)
+dim(filtered_results)[1]
 
-filtered_results = full_join(filtered_cnaqc_res, filtered_ccf_res) %>% 
-  filter(cna_QC=='PASS' & ccf_QC=='PASS')
+end_time <- Sys.time()
+total_time = end_time - start_time
+print(total_time)
 
-# keep at least two karyotypes per sample
-samples_to_keep = filtered_results %>%
-  group_by(sample, karyotype) %>%
-  summarise(.groups = 'drop') %>%
-  group_by(sample) %>%
-  summarise(n_sample = n()) %>%
-  filter(n_sample > 1)
+# filtered_cnaqc = lapply(filtered_cnaqc,
+#                         function(x) {
+#                           
+#                           kar = filtered_results %>% 
+#                             filter(sample==x$snvs$sample[1]) %>%
+#                             select(karyotype) %>%
+#                             unique() %>%
+#                             unlist()
+#                           
+#                           x = x %>% subset_by_segment_karyotype(kar)
+#                           return(x)
+#                           })
 
-filtered_cnaqc = all_cnaqc[samples_to_keep$sample]
 
-filtered_cnaqc = lapply(filtered_cnaqc,
-                        function(x) {
-                          
-                          kar = filtered_results %>% 
-                            filter(sample==x$snvs$sample[1]) %>%
-                            select(karyotype) %>%
-                            unique() %>%
-                            unlist()
-                          
-                          x = x %>% subset_by_segment_karyotype(kar)
-                          return(x)
-                          })
-  
-length(unique(filtered_results$sample))
-dim(filtered_results)
-
-# all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef' %>% plot_peaks_analysis()
+# all_cnaqc$`0ab4d782-9a50-48b9-96e4-6ce42b2ea034` %>% plot_peaks_analysis()
 # all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef' %>% plot_CCF()
 # plot_qc(all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef')
+
