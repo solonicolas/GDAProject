@@ -3,21 +3,29 @@ require(dplyr)
 require(CNAqc)
 require(tidyverse)
 require(mobster)
-
-# set the working directory and the file path
-setwd("/Users/solonicolas/DSSC/Genomic Data Analytics/Giulio/exam")
-file_path = "./rds_giasone"
+library(cowplot)
 
 # take the time
 start_time <- Sys.time()
 
-#### Load the data ####
-pcawg_files = list.files(file_path, full.names = TRUE)
+setwd("/Users/solonicolas/DSSC/Genomic Data Analytics/Giulio/exam")
 
-# for now let's take only 20 samples
-#pcawg_files = pcawg_files[1:10]
-all_pcawg_rds = lapply(pcawg_files, readRDS)
-#all_pcawg_rds =readRDS('rds_PCAWG_selected.rds')
+file_path = "rds_PCAWG_selected.rds"
+
+#### Load the data ####
+
+# if the input data are in a directory
+# pcawg_files = list.files('rds_giasone', full.names = TRUE)
+# pcawg_files = pcawg_files[1:30]
+# all_pcawg_rds = lapply(pcawg_files, readRDS)
+
+# if the input data are in a unique RDS file
+all_pcawg_rds = readRDS(file_path)
+
+# delete a bad sample from Ovarian Cancer Samples
+samples = names(all_pcawg_rds)
+samples = samples[samples != "1659bae5-3140-4d05-891c-81b48277b2fc"]
+all_pcawg_rds = all_pcawg_rds[samples]
 
 # save some metadata of the samples in a df
 metadata = Reduce(rbind, lapply(all_pcawg_rds,
@@ -25,34 +33,47 @@ metadata = Reduce(rbind, lapply(all_pcawg_rds,
                                   # compute the avg coverage per sample
                                   x$metadata$avg_coverage = mean(x$mutations$DP, na.rm=T)
                                   return (x$metadata)
-                                }))
-
-
-# write the metadata in a csv file
-metadata %>% readr::write_csv("metadata.csv")
-
-# index each row with the sample name
-names(all_pcawg_rds) = metadata$sample
-
-
-#### Choose the filters to apply later ####
-min_purity = 0.6
-min_avg_coverage = 40
-#ttypes = c(NA, 'Ovary-AdenoCa') # take some tumor types
-ttypes = unique(metadata$ttype) # take all the tumor types
-min_absolute_karyotype_mutations = 30
-min_karyotype_size = 0.05
-
-
-# apply some primary filters on PURITY, COVERAGE and TUMOR TYPE
-metadata = metadata %>% 
-  filter(purity>min_purity & avg_coverage>min_avg_coverage & ttype %in% ttypes) %>% 
+                                })) %>% 
   select(sample,
          purity,
          ploidy,
          avg_coverage,
          ttype,
          mutation_drivers)
+
+# choose the tumor to analyse
+ttype = 'Ovary-AdenoCA'
+ttypes = c(ttype) # take some tumor types
+#ttypes = unique(metadata$ttype) # take all the tumor types
+
+# create dirs in order to store the results
+
+ttype_dir = paste0(ttype,'/')
+csv_results_dir = paste0(ttype_dir,'csv_results/')
+plots_dir = paste0(ttype_dir,'plots/')
+first_statistics = paste0(ttype_dir,'first_statistics/')
+
+if(dir.exists(ttype_dir)){unlink(ttype_dir, recursive = TRUE)}
+dir.create(ttype_dir)
+dir.create(csv_results_dir)
+dir.create(plots_dir)
+dir.create(first_statistics)
+
+# write the metadata in a csv file
+metadata %>% write_csv(paste0(csv_results_dir,"original_metadata.csv"))
+
+# index each row with the sample name
+# names(all_pcawg_rds) = metadata$sample
+
+#### Choose the filters to apply later ####
+min_purity = 0.6
+min_avg_coverage = 40
+min_absolute_karyotype_mutations = 30
+min_karyotype_size = 0.05
+
+# apply some primary filters on PURITY, COVERAGE and TUMOR TYPE
+metadata = metadata %>% 
+  filter(purity>min_purity & avg_coverage>min_avg_coverage & ttype %in% ttypes)
 
 all_pcawg_rds = all_pcawg_rds[metadata$sample]
 
@@ -82,7 +103,7 @@ all_cnaqc = lapply(all_pcawg_rds,
 
 #### Assessing the quality of the data with CNAqc ####
 
-# peak and CCF analysis
+# peak analysis
 # it's going to take some minutes
 all_cnaqc = lapply(all_cnaqc,  
                    function(x) {
@@ -90,12 +111,11 @@ all_cnaqc = lapply(all_cnaqc,
                        CNAqc::analyze_peaks(
                          min_absolute_karyotype_mutations = min_absolute_karyotype_mutations,
                          min_karyotype_size = min_karyotype_size
-                        ) %>% 
-                       CNAqc::compute_CCF() 
+                       )
                      return(x)
                    })
 
-# take out some results from the cnaqc object
+# take out some results of the peaks analysis
 cnaqc_res = data.frame(matrix(ncol =5))
 colnames(cnaqc_res) = c("sample",
                         "karyotype",
@@ -103,33 +123,86 @@ colnames(cnaqc_res) = c("sample",
                         "cna_QC",
                         "overall_cna_QC")
 
-ccf_res = data.frame(matrix(ncol = 3))
-colnames(ccf_res) = c("sample",
-                      "karyotype",
-                      "ccf_QC")
-
 for(x in all_cnaqc){
   
-  # check if peak and CCF analysis went well 
+  # check if peak analysis went well 
   # they could be NULL because of the filter on the number of mutations
-  if(!is.null(x$peaks_analysis) & !is.null(x$CCF_estimates)) {
+  if(!is.null(x$peaks_analysis)) {
     
-    sample = x$snvs$sample[1]
     karyotypes = x$peaks_analysis$matches$karyotype
     mutation_multiplicity = x$peaks_analysis$matches$mutation_multiplicity
     QC = x$peaks_analysis$matches$QC
     overall_QC = x$peaks_analysis$QC
     
     for(i in 1:length(karyotypes)){
-      cnaqc_res[nrow(cnaqc_res)+1,] = c(sample,
+      cnaqc_res[nrow(cnaqc_res)+1,] = c(x$snvs$sample[1],
                                         karyotypes[i],
                                         mutation_multiplicity[i],
                                         QC[i],
                                         overall_QC)
     }
+  }
+}
+
+# the first line comes NA, so I remove it manually
+cnaqc_res = cnaqc_res[2:dim(cnaqc_res)[1],]
+
+# write the results
+cnaqc_res %>% write_csv(paste0(csv_results_dir,"cnaqc_res.csv"))
+
+# apply filters on the cnaqc PASS/FAIL status
+filtered_cnaqc_res = cnaqc_res %>% 
+  filter(cna_QC=='PASS' & overall_cna_QC=='PASS')
+
+filtered_cnaqc = all_cnaqc[unique(filtered_cnaqc_res$sample)]
+
+# plot peaks analysis
+lapply(filtered_cnaqc,
+       function(x) {
+         
+         # create dir for each sample
+         path = paste0(plots_dir, x$snvs$sample[1], '/')
+         dir.create(path)
+         
+         pdf(paste0(path, 'peaks_analysis.pdf'),width=10,height=9/16*10)
+         print(x %>% plot_peaks_analysis(empty_plot=FALSE))
+         dev.off()
+       })
+
+# subset only the PASS karyotypes
+subset_cnaqc = lapply(filtered_cnaqc,
+                        function(x) {
+                          
+                          kar = filtered_cnaqc_res %>%
+                            filter(sample==x$snvs$sample[1]) %>%
+                            select(karyotype) %>%
+                            unique() %>%
+                            unlist()
+                          
+                          x = x %>% subset_by_segment_karyotype(kar)
+                          return(x)
+                        })
+
+# CCF calculation
+# it's going to take some minutes
+all_ccf = lapply(subset_cnaqc,
+                 function(x) {
+                   x = x %>% CNAqc::compute_CCF()
+                   return(x)
+                  })
+
+# take out some results of the CCF analysis
+ccf_res = data.frame(matrix(ncol = 3))
+colnames(ccf_res) = c("sample","karyotype","ccf_QC")
+
+for(x in all_ccf){
+  
+  # check if CCF analysis went well 
+  # it could be NULL because of the filter on the number of mutations
+  if(!is.null(x$CCF_estimates)) {
     
     for(ccf in x$CCF_estimates){
-      ccf_res[nrow(ccf_res)+1,] = c(sample,
+      ccf_res[nrow(ccf_res)+1,] = c(x$snvs$sample[1],
                                     ccf$QC_table$karyotype,
                                     ccf$QC_table$QC)
     }
@@ -137,45 +210,206 @@ for(x in all_cnaqc){
 } 
 
 # the first line comes NA, so I remove it manually
-cnaqc_res = cnaqc_res[2:dim(cnaqc_res)[1],]
 ccf_res = ccf_res[2:dim(ccf_res)[1],]
 
-# write the cnaqc results in a csv files
-cnaqc_res %>% readr::write_csv("cnaqc_res.csv")
-ccf_res %>% readr::write_csv("ccf_res.csv")
+# write the results
+ccf_res %>% write_csv(paste0(csv_results_dir,"ccf_res.csv"))
+
+# apply last filters on the CCF PASS/FAIL status
+filtered_ccf_res = ccf_res %>%
+  filter(ccf_QC=='PASS')
+
+filtered_ccf = all_ccf[unique(filtered_ccf_res$sample)]
+
+# plot CCF results
+lapply(filtered_ccf,
+       function(x) {
+         path = paste0(plots_dir, x$snvs$sample[1], '/')
+         
+         pdf(paste0(path, 'CCF_analysis.pdf'),width=10,height=9/16*10)
+         print(x %>% plot_CCF(empty_plot=FALSE))
+         dev.off()
+       })
+
+# subset only the PASS karyotypes
+subset_ccf = lapply(filtered_ccf,
+                    function(x) {
+                      
+                      kar = filtered_ccf_res %>%
+                        filter(sample==x$snvs$sample[1]) %>%
+                        select(karyotype) %>%
+                        unique() %>%
+                        unlist()
+                      
+                      x = x %>% subset_by_segment_karyotype(kar)
+                      return(x)
+                    })
 
 
-# apply last filters on the PASS/FAIL status
+#### A bit of statistics ####
 
-filtered_results = inner_join(cnaqc_res,
-                              ccf_res,
-                              by = c("sample", "karyotype")) %>% 
-  filter(cna_QC=='PASS' & overall_cna_QC=='PASS' & ccf_QC=='PASS')
+# let's plot the distribution of the karyotypes
 
-filtered_cnaqc = all_cnaqc[unique(filtered_results$sample)]
+# situation after peaks analysis
+peaks_kar_plots = lapply(subset_cnaqc,
+                   function(x) {
+                     p = plot_karyotypes(x)
+                     p$data$call = ""
+                     p$labels$title = ""
+                     p$labels$x = ""
+                     p$labels$y = ""
+                     p$theme$plot.margin=margin(0,0,0,0)
+                     p$theme$strip.text$margin=margin(0,0,0,0)
+                     p$theme$panel.spacing=margin(0)
+                     return(p)
+                   })
 
-length(filtered_cnaqc)
-dim(filtered_results)[1]
+pdf(paste0(first_statistics,'karyotypes_after_peaks'))
+ggarrange(plotlist=peaks_kar_plots,
+          common.legend = TRUE,
+          legend = 'bottom')
+dev.off()
 
+# situation after both peaks and CCF analysis
+ccf_kar_plots = lapply(subset_ccf,
+                   function(x) {
+                     p = plot_karyotypes(x)
+                     p$data$call = ""
+                     p$labels$title = ""
+                     p$labels$x = ""
+                     p$labels$y = ""
+                     p$theme$plot.margin=margin(0,0,0,0)
+                     p$theme$strip.text$margin=margin(0,0,0,0)
+                     p$theme$panel.spacing=margin(0)
+                     return(p)
+                   })
+
+pdf(paste0(first_statistics,'karyotypes_after_CCF'))
+ggarrange(plotlist=ccf_kar_plots,
+          common.legend = TRUE,
+          legend = 'bottom')
+dev.off()
+
+
+
+#### Mobster deconvolution ####
+
+# here we should decide wheter to take diploid mutations using VAF
+# or aneuploid mutations using CCF values
+# final_karyotype = '2:1'
+final_karyotype = 'all'
+all_mobster = subset_ccf
+filtered_res = filtered_ccf_res
+
+# keep only sample with 'final_karyotype'
+all_mobster = all_mobster[unique(
+  filtered_res$sample[filtered_res$karyotype==final_karyotype])]
+
+# subset SNVs for mobster 
+# subset only final_karyotype
+all_mobster = lapply(all_mobster,
+                     function(x) {
+                       x = x %>% subset_snvs() #%>% subset_by_segment_karyotype(c(final_karyotype))
+                       return(x)
+                      })
+
+# if we chose NON diploid mutations
+# we should add the CCF column to the data
+# we calculate again CCf values!!
+
+all_mobster = lapply(all_mobster,
+                     function(x) {
+                       x = x %>% CNAqc::compute_CCF()
+                       ccf = c()
+                       for(kar in x$CCF_estimates) {
+                         ccf = c(ccf, kar$mutations$VAF)
+                       }
+                       x$snvs$VAF = ccf #x$CCF_estimates[[1]]$mutations$VAF
+                       
+                       return(x)
+                       })
+
+# perform mobster deconvolution
+mobster_fits = lapply(all_mobster,
+                      function(x) {
+                        x = x$snvs %>% mobster_fit(auto_setup = 'FAST')
+                        return(x)
+                      })
+
+# take out some results of the mobster deconvolution
+mobster_res = data.frame(matrix(ncol = 4))
+colnames(mobster_res) = c("sample","clusters","tail","n")
+
+for(x in mobster_fits){
+  
+  mobster_res[nrow(mobster_res)+1,] = c(x$best$Call$X$sample[1],
+                                        x$best$Kbeta,
+                                        x$best$fit.tail,
+                                        x$best$N)
+}
+
+# the first line comes NA, so I remove it manually
+mobster_res = mobster_res[2:dim(mobster_res)[1],]
+
+# write the results
+mobster_res %>% write_csv(paste0(csv_results_dir,"mobster_res_",final_karyotype,".csv"))
+
+
+# plot some mobster decovolution results
+
+lapply(mobster_fits,
+       function(x) {
+         
+         path = paste0(plots_dir, x$best$Call$X$sample[1], '/')
+         
+         pdf(paste0(path, 'deconvolution_',final_karyotype,'.pdf'),
+             width=10, 
+             height=9/16*10)
+         print(x$best %>% plot())
+         dev.off()
+       })
+
+
+# filter only sample with the tail
+tail_res = mobster_res %>% filter(tail==TRUE)
+
+tail_samples = mobster_fits[unique(tail_res$sample)]
+
+# calculation of the evolutionary parameters
+evol_params = data.frame(matrix(ncol = 5))
+colnames(evol_params) = c("sample","mu","clusters","s","t")
+
+for(x in tail_samples){
+  
+  params = x %>% evolutionary_parameters()
+  
+  # if there are subclones
+  if(dim(params)[2]>2) {
+    for(i in 1:dim(params)[1]) {
+      evol_params[nrow(evol_params)+1,] = c(x$best$Call$X$sample[1],
+                                            params$mu[i],
+                                            params$cluster[i],
+                                            params$s[i],
+                                            params$time[i])
+    }
+  } else { # if there are NO subclones
+    evol_params[nrow(evol_params)+1,] = c(x$best$Call$X$sample[1],
+                                          params$mu,
+                                          NA,
+                                          NA,
+                                          NA)
+  }
+}
+
+# the first line comes NA, so I remove it manually
+evol_params = evol_params[2:dim(evol_params)[1],]
+
+# write the results
+evol_params %>% write_csv(paste0(csv_results_dir,"evolutionary_parameters_",final_karyotype,".csv"))
+
+
+# take the time
 end_time <- Sys.time()
 total_time = end_time - start_time
 print(total_time)
-
-# filtered_cnaqc = lapply(filtered_cnaqc,
-#                         function(x) {
-#                           
-#                           kar = filtered_results %>% 
-#                             filter(sample==x$snvs$sample[1]) %>%
-#                             select(karyotype) %>%
-#                             unique() %>%
-#                             unlist()
-#                           
-#                           x = x %>% subset_by_segment_karyotype(kar)
-#                           return(x)
-#                           })
-
-
-# all_cnaqc$`0ab4d782-9a50-48b9-96e4-6ce42b2ea034` %>% plot_peaks_analysis()
-# all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef' %>% plot_CCF()
-# plot_qc(all_cnaqc$'00b9d0e6-69dc-4345-bffd-ce32880c8eef')
 
