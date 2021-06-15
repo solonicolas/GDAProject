@@ -22,25 +22,20 @@ file_path = "rds_PCAWG_selected.rds"
 # if the input data are in a unique RDS file
 all_pcawg_rds = readRDS(file_path)
 
-# delete a bad sample from Ovarian Cancer Samples
-samples = names(all_pcawg_rds)
-samples = samples[samples != "1659bae5-3140-4d05-891c-81b48277b2fc"]
-all_pcawg_rds = all_pcawg_rds[samples]
-
 # save some metadata of the samples in a df
+columns = c('sample','purity','ploidy','ttype','mutation_drivers')
 metadata = Reduce(rbind, lapply(all_pcawg_rds,
                                 function(x) {
-                                  # compute the avg coverage per sample
-                                  x$metadata$avg_coverage = mean(x$mutations$DP, na.rm=T)
-                                  return (x$metadata)
-                                })) %>% 
-  select(sample,
-         purity,
-         ploidy,
-         avg_coverage,
-         ttype,
-         mutation_drivers)
+                                  if(all(columns %in% names(x$metadata))==TRUE){
+                                    # compute the avg coverage per sample
+                                    x$metadata$avg_coverage = mean(x$mutations$DP, na.rm=T)
+                                    return (x$metadata)
+                                  } else{return (NA)}
+                                })) %>%
+  select(sample,purity,ploidy,avg_coverage,ttype,mutation_drivers) %>%
+  filter(!across(everything(), is.na))
 
+  
 # choose the tumor to analyse
 ttype = 'Ovary-AdenoCA'
 ttypes = c(ttype) # take some tumor types
@@ -70,22 +65,27 @@ min_purity = 0.6
 min_avg_coverage = 40
 min_absolute_karyotype_mutations = 30
 min_karyotype_size = 0.05
+tail_cut_off = 0.05
 
 # apply some primary filters on PURITY, COVERAGE and TUMOR TYPE
 metadata = metadata %>% 
   filter(purity>min_purity & avg_coverage>min_avg_coverage & ttype %in% ttypes)
 
 all_pcawg_rds = all_pcawg_rds[metadata$sample]
-
-
+         
 # put the value of 1 in the CCF columns if it is made of only NA values
 # to avoid the error in the cnaqc package
+# moreover, keep only mutations with VAF > 0.05
 all_pcawg_rds = lapply(all_pcawg_rds,
                        function(x) {
                          if(all(is.na(x$cna$CCF))==TRUE) { # check if there are all NA
                            x$cna = x$cna %>% 
                              mutate(CCF = 1)
                          }
+                         
+                         x$mutations = x$mutations %>% 
+                           filter(VAF > tail_cut_off)
+                         
                          return (x)
                        })
 
@@ -294,38 +294,49 @@ dev.off()
 
 #### Mobster deconvolution ####
 
-# here we should decide wheter to take diploid mutations using VAF
+# here we should decide whether to take diploid mutations using VAF
 # or aneuploid mutations using CCF values
-# final_karyotype = '2:1'
-final_karyotype = 'all'
-all_mobster = subset_ccf
-filtered_res = filtered_ccf_res
+final_karyotype = 'max' #'2:1'
+all_mobster = subset_ccf # subset_cnaqc
+filtered_res = filtered_ccf_res # filtered_cnaqc_res
 
-# keep only sample with 'final_karyotype'
-all_mobster = all_mobster[unique(
-  filtered_res$sample[filtered_res$karyotype==final_karyotype])]
-
-# subset SNVs for mobster 
-# subset only final_karyotype
-all_mobster = lapply(all_mobster,
-                     function(x) {
-                       x = x %>% subset_snvs() #%>% subset_by_segment_karyotype(c(final_karyotype))
-                       return(x)
-                      })
+if(final_karyotype == 'max') {
+    
+  # subset only the karyotype with the maximum number of mutations
+  all_mobster = lapply(all_mobster,
+                       function(x) {
+                         
+                         # max karyotype
+                         max_kar = names(x$n_karyotype[1])
+                         
+                         x = x %>% 
+                           subset_snvs() %>% 
+                           subset_by_segment_karyotype(c(max_kar))
+                         return(x)
+                         })
+    
+} else {
+  # keep only sample with 'final_karyotype'
+  all_mobster = all_mobster[unique(
+    filtered_res$sample[filtered_res$karyotype==final_karyotype])]
+    
+  # subset only the final karyotype
+  all_mobster = lapply(all_mobster,
+                       function(x) {
+                         x = x %>% 
+                           subset_snvs() %>% 
+                           subset_by_segment_karyotype(c(final_karyotype))
+                         return(x)
+                        })
+}
 
 # if we chose NON diploid mutations
 # we should add the CCF column to the data
-# we calculate again CCf values!!
-
+# we calculate again CCf values!
 all_mobster = lapply(all_mobster,
                      function(x) {
                        x = x %>% CNAqc::compute_CCF()
-                       ccf = c()
-                       for(kar in x$CCF_estimates) {
-                         ccf = c(ccf, kar$mutations$VAF)
-                       }
-                       x$snvs$VAF = ccf #x$CCF_estimates[[1]]$mutations$VAF
-                       
+                       x$snvs$VAF = x$CCF_estimates[[1]]$mutations$VAF
                        return(x)
                        })
 
@@ -337,12 +348,13 @@ mobster_fits = lapply(all_mobster,
                       })
 
 # take out some results of the mobster deconvolution
-mobster_res = data.frame(matrix(ncol = 4))
-colnames(mobster_res) = c("sample","clusters","tail","n")
+mobster_res = data.frame(matrix(ncol = 5))
+colnames(mobster_res) = c("sample","kar","clusters","tail","n")
 
 for(x in mobster_fits){
   
   mobster_res[nrow(mobster_res)+1,] = c(x$best$Call$X$sample[1],
+                                        x$best$Call$X$karyotype[1],
                                         x$best$Kbeta,
                                         x$best$fit.tail,
                                         x$best$N)
@@ -352,18 +364,25 @@ for(x in mobster_fits){
 mobster_res = mobster_res[2:dim(mobster_res)[1],]
 
 # write the results
-mobster_res %>% write_csv(paste0(csv_results_dir,"mobster_res_",final_karyotype,".csv"))
+kar = ifelse(final_karyotype=='max',
+           final_karyotype,
+           gsub(":","_",final_karyotype))
+
+mobster_res %>% write_csv(paste0(csv_results_dir,
+                                 "mobster_res_",kar,".csv"))
 
 
 # plot some mobster decovolution results
-
 lapply(mobster_fits,
        function(x) {
          
          path = paste0(plots_dir, x$best$Call$X$sample[1], '/')
-         
-         pdf(paste0(path, 'deconvolution_',final_karyotype,'.pdf'),
-             width=10, 
+         pdf(paste0(path,'deconvolution_',
+                    ifelse(kar!='max',kar,
+                           paste0(gsub(":",
+                                       "_",
+                                       x$best$Call$X$karyotype[1]),"_max")),'.pdf'),
+             width=10,
              height=9/16*10)
          print(x$best %>% plot())
          dev.off()
@@ -376,17 +395,19 @@ tail_res = mobster_res %>% filter(tail==TRUE)
 tail_samples = mobster_fits[unique(tail_res$sample)]
 
 # calculation of the evolutionary parameters
-evol_params = data.frame(matrix(ncol = 5))
-colnames(evol_params) = c("sample","mu","clusters","s","t")
+evol_params = data.frame(matrix(ncol = 6))
+colnames(evol_params) = c("sample","kar","mu","clusters","s","t")
 
 for(x in tail_samples){
   
   params = x %>% evolutionary_parameters()
+  k = x$best$Call$X$karyotype[1]
   
   # if there are subclones
-  if(dim(params)[2]>2) {
+  if((dim(params)[2]>2 & k=="1:1") | (dim(params)[1]>1 & k!="1:1")) {
     for(i in 1:dim(params)[1]) {
       evol_params[nrow(evol_params)+1,] = c(x$best$Call$X$sample[1],
+                                            k,
                                             params$mu[i],
                                             params$cluster[i],
                                             params$s[i],
@@ -394,6 +415,7 @@ for(x in tail_samples){
     }
   } else { # if there are NO subclones
     evol_params[nrow(evol_params)+1,] = c(x$best$Call$X$sample[1],
+                                          k,
                                           params$mu,
                                           NA,
                                           NA,
@@ -405,11 +427,10 @@ for(x in tail_samples){
 evol_params = evol_params[2:dim(evol_params)[1],]
 
 # write the results
-evol_params %>% write_csv(paste0(csv_results_dir,"evolutionary_parameters_",final_karyotype,".csv"))
-
+evol_params %>% write_csv(paste0(csv_results_dir,
+                                 "evolutionary_parameters_",kar,".csv"))
 
 # take the time
 end_time <- Sys.time()
 total_time = end_time - start_time
 print(total_time)
-
